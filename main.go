@@ -3,10 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+
+	"github.com/gogo/protobuf/proto"
+	"github.com/golang/snappy"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/prompb"
 
 	"github.com/couchbase/gocb"
 	"github.com/gorilla/mux"
@@ -44,13 +50,48 @@ type CouchbaseAdapter struct {
 }
 
 func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) {
+	compressed, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	reqBuf, err := snappy.Decode(nil, compressed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req prompb.WriteRequest
+	if err := proto.Unmarshal(reqBuf, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	for _, ts := range req.Timeseries {
+		metric := make(model.Metric, len(ts.Labels))
+		for _, l := range ts.Labels {
+			metric[model.LabelName(l.Name)] = model.LabelValue(l.Value)
+		}
+
+		for _, sample := range ts.Samples {
+			_, err := ca.Bucket.Upsert(fmt.Sprintf("%s-%d-%f", metric.String(), sample.Timestamp, sample.Value), model.Sample{
+				Metric:    metric,
+				Timestamp: model.Time(sample.Timestamp),
+				Value:     model.SampleValue(sample.Value),
+			}, 0)
+			if err != nil {
+				fmt.Println(err)
+			}
+		}
+	}
+
 	w.WriteHeader(200)
-	w.Write([]byte{})
 }
 
 func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
+
 	w.WriteHeader(200)
-	w.Write([]byte{})
 }
 
 func main() {
@@ -78,6 +119,8 @@ func main() {
 	config.InitFromViper(v)
 
 	fmt.Println(config.Username)
+	fmt.Println(config.Password)
+	fmt.Println(config.BucketName)
 
 	// gocb.SetLogger(gocb.VerboseStdioLogger())
 	cluster, err := gocb.Connect(config.ConnStr)

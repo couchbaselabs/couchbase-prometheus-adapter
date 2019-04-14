@@ -1,3 +1,4 @@
 .DS_Store
 couchbase-prometheus-plugin
 config.yaml
+.idea/
