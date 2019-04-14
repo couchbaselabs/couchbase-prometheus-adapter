@@ -1,0 +1,7 @@
+couchbase:
+  bucket: default
+  username: Administrator
+  password: password
+  connString: couchbase://localhost
+http:
+  listen: http://localhost:8081
