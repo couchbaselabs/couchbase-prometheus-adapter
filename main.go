@@ -107,7 +107,24 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 }
 
 func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
+	compressed, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
+	reqBuf, err := snappy.Decode(nil, compressed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req prompb.ReadRequest
+	if err := proto.Unmarshal(reqBuf, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	fmt.Print("REQUEST")
 	w.WriteHeader(200)
 }
 
@@ -185,7 +202,7 @@ func routes(ca *CouchbaseAdapter) *mux.Router {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/write", ca.handleWrite)
-	router.HandleFunc("/read", ca.handleWrite)
+	router.HandleFunc("/read", ca.handleRead)
 
 	return router
 }
