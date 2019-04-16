@@ -9,9 +9,10 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/google/uuid"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
-	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 
 	"github.com/couchbase/gocb"
@@ -49,6 +50,15 @@ type CouchbaseAdapter struct {
 	Bucket  *gocb.Bucket
 }
 
+type Sample struct {
+	Metric    map[string]string `json:"metric"`
+	Timestamp int64             `json:"timestamp"`
+	Value     float64           `json:"value"`
+}
+
+type multiError struct {
+}
+
 func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 	compressed, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -68,20 +78,27 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	var errs []error
 	for _, ts := range req.Timeseries {
-		metric := make(model.Metric, len(ts.Labels))
+		metric := make(map[string]string, len(ts.Labels))
 		for _, l := range ts.Labels {
-			metric[model.LabelName(l.Name)] = model.LabelValue(l.Value)
+			metric[l.Name] = l.Value
 		}
 
 		for _, sample := range ts.Samples {
-			_, err := ca.Bucket.Upsert(fmt.Sprintf("%s-%d-%f", metric.String(), sample.Timestamp, sample.Value), model.Sample{
+			uid, err := uuid.NewRandom()
+			if err != nil {
+				errs = append(errs, err)
+			}
+
+			// the key is pretty irrelevant, so long as it's unique then we're good
+			_, err = ca.Bucket.Upsert(uid.String(), Sample{
 				Metric:    metric,
-				Timestamp: model.Time(sample.Timestamp),
-				Value:     model.SampleValue(sample.Value),
+				Timestamp: sample.Timestamp,
+				Value:     sample.Value,
 			}, 0)
 			if err != nil {
-				fmt.Println(err)
+				errs = append(errs, err)
 			}
 		}
 	}
@@ -117,10 +134,6 @@ func main() {
 
 	var config Config
 	config.InitFromViper(v)
-
-	fmt.Println(config.Username)
-	fmt.Println(config.Password)
-	fmt.Println(config.BucketName)
 
 	// gocb.SetLogger(gocb.VerboseStdioLogger())
 	cluster, err := gocb.Connect(config.ConnStr)
