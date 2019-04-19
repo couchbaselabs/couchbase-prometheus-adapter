@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+
+	"github.com/prometheus/common/model"
 
 	"github.com/google/uuid"
 
@@ -54,9 +57,6 @@ type Sample struct {
 	Metric    map[string]string `json:"metric"`
 	Timestamp int64             `json:"timestamp"`
 	Value     float64           `json:"value"`
-}
-
-type multiError struct {
 }
 
 func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +106,56 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(200)
 }
 
+func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSeries, error) {
+	selectors := make([]string, 0, len(query.Matchers)+2)
+	params := make([]interface{}, 0, len(query.Matchers)+2)
+	for _, matcher := range query.Matchers {
+		switch matcher.Type {
+		case prompb.LabelMatcher_EQ:
+			selectors = append(selectors, fmt.Sprintf("\"%s\"=?", matcher.Name))
+			params = append(params, matcher.Value)
+		}
+	}
+	selectors = append(selectors, fmt.Sprintf("\"timestamp\" BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
+
+	n1ql := gocb.NewN1qlQuery(fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.Bucket.Name(),
+		strings.Join(selectors, " AND ")))
+	res, err := ca.Bucket.ExecuteN1qlQuery(n1ql, params)
+	if err != nil {
+		return nil, err
+	}
+
+	timeseries := map[string]*prompb.TimeSeries{}
+	var sample Sample
+	for res.Next(&sample) {
+		metric := model.Metric{}
+		for k, v := range sample.Metric {
+			metric[model.LabelName(k)] = model.LabelValue(v)
+		}
+
+		ts, ok := timeseries[metric.String()]
+		if !ok {
+			ts = &prompb.TimeSeries{}
+			for k, v := range sample.Metric {
+				ts.Labels = append(ts.Labels, prompb.Label{Name: k, Value: v})
+			}
+			timeseries[metric.String()] = ts
+		}
+		ts.Samples = append(ts.Samples, prompb.Sample{Timestamp: sample.Timestamp, Value: sample.Value})
+	}
+
+	resp := make([]*prompb.TimeSeries, 0, len(timeseries))
+	for _, v := range timeseries {
+		resp = append(resp, v)
+	}
+
+	return resp, nil
+}
+
+func (ca *CouchbaseAdapter) processQueries(queries []*prompb.Query) ([]*prompb.TimeSeries, error) {
+	return nil, nil
+}
+
 func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
 	compressed, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -124,8 +174,28 @@ func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fmt.Print("REQUEST")
-	w.WriteHeader(200)
+	result, err := ca.processQuery(req.Queries[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := prompb.ReadResponse{
+		Results: []*prompb.QueryResult{
+			{Timeseries: result},
+		},
+	}
+	data, err := proto.Marshal(&resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	if _, err := w.Write(snappy.Encode(nil, data)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 func main() {
