@@ -113,8 +113,14 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 		switch matcher.Type {
 		case prompb.LabelMatcher_EQ:
 			selectors = append(selectors, fmt.Sprintf("\"%s\"=?", matcher.Name))
-			params = append(params, matcher.Value)
+		case prompb.LabelMatcher_NEQ:
+			selectors = append(selectors, fmt.Sprintf("\"%s\"!=?", matcher.Name))
+		case prompb.LabelMatcher_RE:
+			selectors = append(selectors, fmt.Sprintf("REGEX_CONTAINS(\"%s\", ?)", matcher.Name))
+		case prompb.LabelMatcher_NRE:
+			selectors = append(selectors, fmt.Sprintf("NOT REGEX_CONTAINS(\"%s\", ?)", matcher.Name))
 		}
+		params = append(params, matcher.Value)
 	}
 	selectors = append(selectors, fmt.Sprintf("\"timestamp\" BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
 
