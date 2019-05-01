@@ -133,7 +133,7 @@ func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var errs []error
+	var errs []string
 	for _, ts := range req.Timeseries {
 		metric := make(map[string]string, len(ts.Labels))
 		for _, l := range ts.Labels {
@@ -143,7 +143,8 @@ func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 		for _, sample := range ts.Samples {
 			uid, err := uuid.NewRandom()
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, err.Error())
+				continue
 			}
 
 			writeTimer := prometheus.NewTimer(writeCBDuration)
@@ -156,10 +157,15 @@ func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeTimer.ObserveDuration()
 			if err != nil {
 				writeCBErrors.Inc()
-				errs = append(errs, err)
+				errs = append(errs, err.Error())
 			}
 		}
 		writeSamples.Observe(float64(len(ts.Samples)))
+	}
+
+	if len(errs) > 0 {
+		http.Error(w, strings.Join(errs, ", "), http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(200)
