@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -133,6 +134,15 @@ func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := ca.processWrite(req); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(200)
+}
+
+func (ca *Adapter) processWrite(req prompb.WriteRequest) error {
 	var errs []string
 	for _, ts := range req.Timeseries {
 		metric := make(map[string]string, len(ts.Labels))
@@ -164,11 +174,10 @@ func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(errs) > 0 {
-		http.Error(w, strings.Join(errs, ", "), http.StatusInternalServerError)
-		return
+		return errors.New(strings.Join(errs, ", "))
 	}
 
-	w.WriteHeader(200)
+	return nil
 }
 
 func (ca *Adapter) processQuery(query *prompb.Query) ([]*prompb.TimeSeries, error) {
