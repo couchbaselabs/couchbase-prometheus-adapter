@@ -178,10 +178,10 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	}
 	selectors = append(selectors, fmt.Sprintf("timestamp BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
 
-	n1ql := gocb.NewN1qlQuery(fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.Bucket.Name(),
+	q := gocb.NewAnalyticsQuery(fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.Bucket.Name(),
 		strings.Join(selectors, " AND ")))
 	timer := prometheus.NewTimer(readCBDuration)
-	res, err := ca.Bucket.ExecuteN1qlQuery(n1ql, params)
+	res, err := ca.Bucket.ExecuteAnalyticsQuery(q, params)
 	timer.ObserveDuration()
 	if err != nil {
 		readCBErrors.Inc()
@@ -289,7 +289,6 @@ func main() {
 	var config Config
 	config.InitFromViper(v)
 
-	// gocb.SetLogger(gocb.VerboseStdioLogger())
 	cluster, err := gocb.Connect(config.ConnStr)
 	if err != nil {
 		fmt.Println(err)
