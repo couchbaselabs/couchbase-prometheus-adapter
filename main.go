@@ -50,9 +50,14 @@ func (cfg *Config) InitFromViper(v *viper.Viper) {
 	cfg.ListenAddr = v.GetString(listenAddr)
 }
 
-type CouchbaseAdapter struct {
-	Cluster *gocb.Cluster
-	Bucket  *gocb.Bucket
+type StorageAdapter interface {
+	Store(key string, sample Sample) error
+	Read(query string, params []interface{}) ([]Sample, error)
+	BucketName() string
+}
+
+type Adapter struct {
+	storageAdapter StorageAdapter
 }
 
 type Sample struct {
@@ -107,7 +112,7 @@ func init() {
 	prometheus.MustRegister(readCBErrors)
 }
 
-func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) {
+func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 	timer := prometheus.NewTimer(writeDuration)
 	defer timer.ObserveDuration()
 	compressed, err := ioutil.ReadAll(r.Body)
@@ -143,11 +148,11 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 
 			writeTimer := prometheus.NewTimer(writeCBDuration)
 			// the key is pretty irrelevant, so long as it's unique then we're good
-			_, err = ca.Bucket.Upsert(uid.String(), Sample{
+			err = ca.storageAdapter.Store(uid.String(), Sample{
 				Metric:    metric,
 				Timestamp: sample.Timestamp,
 				Value:     sample.Value,
-			}, 0)
+			})
 			writeTimer.ObserveDuration()
 			if err != nil {
 				writeCBErrors.Inc()
@@ -160,7 +165,7 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(200)
 }
 
-func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSeries, error) {
+func (ca *Adapter) processQuery(query *prompb.Query) ([]*prompb.TimeSeries, error) {
 	selectors := make([]string, 0, len(query.Matchers)+2)
 	params := make([]interface{}, 0, len(query.Matchers)+2)
 	for _, matcher := range query.Matchers {
@@ -178,10 +183,10 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	}
 	selectors = append(selectors, fmt.Sprintf("timestamp BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
 
-	q := gocb.NewAnalyticsQuery(fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.Bucket.Name(),
-		strings.Join(selectors, " AND ")))
+	q := fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.storageAdapter.BucketName(),
+		strings.Join(selectors, " AND "))
 	timer := prometheus.NewTimer(readCBDuration)
-	res, err := ca.Bucket.ExecuteAnalyticsQuery(q, params)
+	samples, err := ca.storageAdapter.Read(q, params)
 	timer.ObserveDuration()
 	if err != nil {
 		readCBErrors.Inc()
@@ -189,8 +194,7 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	}
 
 	timeseries := map[string]*prompb.TimeSeries{}
-	var sample Sample
-	for res.Next(&sample) {
+	for _, sample := range samples {
 		metric := model.Metric{}
 		for k, v := range sample.Metric {
 			metric[model.LabelName(k)] = model.LabelValue(v)
@@ -216,11 +220,11 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	return resp, nil
 }
 
-func (ca *CouchbaseAdapter) processQueries(queries []*prompb.Query) ([]*prompb.TimeSeries, error) {
+func (ca *Adapter) processQueries(queries []*prompb.Query) ([]*prompb.TimeSeries, error) {
 	return nil, nil
 }
 
-func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
+func (ca *Adapter) handleRead(w http.ResponseWriter, r *http.Request) {
 	timer := prometheus.NewTimer(readDuration)
 	defer timer.ObserveDuration()
 	compressed, err := ioutil.ReadAll(r.Body)
@@ -281,7 +285,7 @@ func main() {
 	if configPath != "" {
 		err := v.ReadInConfig()
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			panic(err)
 		}
 	}
@@ -289,30 +293,14 @@ func main() {
 	var config Config
 	config.InitFromViper(v)
 
-	cluster, err := gocb.Connect(config.ConnStr)
+	storageAdapter, err := NewCouchbaseAdapter(config.ConnStr, config.Username, config.Password, config.BucketName)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		panic(err)
 	}
 
-	err = cluster.Authenticate(gocb.PasswordAuthenticator{
-		Username: config.Username,
-		Password: config.Password,
-	})
-	if err != nil {
-		fmt.Println(err)
-		panic(err)
-	}
-
-	bucket, err := cluster.OpenBucket(config.BucketName, "")
-	if err != nil {
-		fmt.Println(err)
-		panic(err)
-	}
-
-	ca := &CouchbaseAdapter{
-		Cluster: cluster,
-		Bucket:  bucket,
+	ca := &Adapter{
+		storageAdapter: storageAdapter,
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -334,7 +322,7 @@ func main() {
 	srv.Shutdown(nil)
 }
 
-func routes(ca *CouchbaseAdapter) *mux.Router {
+func routes(ca *Adapter) *mux.Router {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/write", ca.handleWrite)
