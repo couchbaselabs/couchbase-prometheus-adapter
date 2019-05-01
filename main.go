@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/prometheus/common/model"
 
 	"github.com/google/uuid"
@@ -59,7 +61,55 @@ type Sample struct {
 	Value     float64           `json:"value"`
 }
 
+var (
+	writeDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "couchbase_adapter_write_latency_seconds",
+		Help: "How long it took us to respond to write requests.",
+	})
+	writeSamples = prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "couchbase_adapter_write_timeseries_samples",
+		Help: "How many samples each written timeseries has.",
+	})
+	writeCBDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "couchbase_adapter_write_couchbase_latency_seconds",
+		Help: "Latency for inserts to Couchbase Server.",
+	})
+	writeCBErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "couchbase_adapter_write_couchbase_failed_total",
+		Help: "How many inserts to Couchbase Server failed.",
+	})
+	readDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "couchbase_adapter_read_latency_seconds",
+		Help: "How long it took us to respond to read requests.",
+	})
+	readCBDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "couchbase_adapter_read_couchbase_latency_seconds",
+		Help: "Latency for selects from Crate.",
+	})
+	readCBErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "couchbase_adapter_read_couchbase_failed_total",
+		Help: "How many selects from Crate failed.",
+	})
+	readSamples = prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "couchbase_adapter_read_timeseries_samples",
+		Help: "How many samples each returned timeseries has.",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(writeDuration)
+	prometheus.MustRegister(writeSamples)
+	prometheus.MustRegister(writeCBDuration)
+	prometheus.MustRegister(writeCBErrors)
+	prometheus.MustRegister(readDuration)
+	prometheus.MustRegister(readSamples)
+	prometheus.MustRegister(readCBDuration)
+	prometheus.MustRegister(readCBErrors)
+}
+
 func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) {
+	timer := prometheus.NewTimer(writeDuration)
+	defer timer.ObserveDuration()
 	compressed, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -91,16 +141,20 @@ func (ca *CouchbaseAdapter) handleWrite(w http.ResponseWriter, r *http.Request) 
 				errs = append(errs, err)
 			}
 
+			writeTimer := prometheus.NewTimer(writeCBDuration)
 			// the key is pretty irrelevant, so long as it's unique then we're good
 			_, err = ca.Bucket.Upsert(uid.String(), Sample{
 				Metric:    metric,
 				Timestamp: sample.Timestamp,
 				Value:     sample.Value,
 			}, 0)
+			writeTimer.ObserveDuration()
 			if err != nil {
+				writeCBErrors.Inc()
 				errs = append(errs, err)
 			}
 		}
+		writeSamples.Observe(float64(len(ts.Samples)))
 	}
 
 	w.WriteHeader(200)
@@ -112,22 +166,25 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	for _, matcher := range query.Matchers {
 		switch matcher.Type {
 		case prompb.LabelMatcher_EQ:
-			selectors = append(selectors, fmt.Sprintf("\"%s\"=?", matcher.Name))
+			selectors = append(selectors, fmt.Sprintf("metric.%s=?", matcher.Name))
 		case prompb.LabelMatcher_NEQ:
-			selectors = append(selectors, fmt.Sprintf("\"%s\"!=?", matcher.Name))
+			selectors = append(selectors, fmt.Sprintf("metric.%s!=?", matcher.Name))
 		case prompb.LabelMatcher_RE:
-			selectors = append(selectors, fmt.Sprintf("REGEX_CONTAINS(\"%s\", ?)", matcher.Name))
+			selectors = append(selectors, fmt.Sprintf("REGEX_CONTAINS(metric.%s, ?)", matcher.Name))
 		case prompb.LabelMatcher_NRE:
-			selectors = append(selectors, fmt.Sprintf("NOT REGEX_CONTAINS(\"%s\", ?)", matcher.Name))
+			selectors = append(selectors, fmt.Sprintf("NOT REGEX_CONTAINS(metric.%s, ?)", matcher.Name))
 		}
 		params = append(params, matcher.Value)
 	}
-	selectors = append(selectors, fmt.Sprintf("\"timestamp\" BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
+	selectors = append(selectors, fmt.Sprintf("timestamp BETWEEN %d AND %d", query.StartTimestampMs, query.EndTimestampMs))
 
 	n1ql := gocb.NewN1qlQuery(fmt.Sprintf("SELECT `metric`, `timestamp`, `value` from `%s` WHERE %s", ca.Bucket.Name(),
 		strings.Join(selectors, " AND ")))
+	timer := prometheus.NewTimer(readCBDuration)
 	res, err := ca.Bucket.ExecuteN1qlQuery(n1ql, params)
+	timer.ObserveDuration()
 	if err != nil {
+		readCBErrors.Inc()
 		return nil, err
 	}
 
@@ -151,8 +208,9 @@ func (ca *CouchbaseAdapter) processQuery(query *prompb.Query) ([]*prompb.TimeSer
 	}
 
 	resp := make([]*prompb.TimeSeries, 0, len(timeseries))
-	for _, v := range timeseries {
+	for k, v := range timeseries {
 		resp = append(resp, v)
+		readSamples.Observe(float64(len(timeseries[k].Samples)))
 	}
 
 	return resp, nil
@@ -163,6 +221,8 @@ func (ca *CouchbaseAdapter) processQueries(queries []*prompb.Query) ([]*prompb.T
 }
 
 func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
+	timer := prometheus.NewTimer(readDuration)
+	defer timer.ObserveDuration()
 	compressed, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -205,6 +265,7 @@ func (ca *CouchbaseAdapter) handleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	gocb.SetLogger(gocb.DefaultStdioLogger())
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "A path to the plugin's configuration file")
 	flag.Parse()
@@ -268,7 +329,7 @@ func main() {
 		}
 	}()
 
-	fmt.Println("Server running on", srv.Addr)
+	log.Println("Server running on", srv.Addr)
 	<-stop
 	log.Println("Stopping server")
 	srv.Shutdown(nil)
