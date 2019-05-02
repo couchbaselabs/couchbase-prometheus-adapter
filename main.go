@@ -40,9 +40,6 @@ type Config struct {
 	ListenAddr string `yaml:"http.listen"`
 }
 
-func (cfg *Config) AddFlags(flagSet *flag.FlagSet) {
-}
-
 func (cfg *Config) InitFromViper(v *viper.Viper) {
 	cfg.ConnStr = v.GetString(connStr)
 	cfg.Username = v.GetString(username)
@@ -290,6 +287,8 @@ func main() {
 	flag.Parse()
 
 	v := viper.New()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
 	if configPath != "" {
 		v.SetConfigFile(configPath)
 	}
