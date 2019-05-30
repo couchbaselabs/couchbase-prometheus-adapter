@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/prometheus/common/model"
@@ -65,50 +67,39 @@ type Sample struct {
 }
 
 var (
-	writeDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	writeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "couchbase_adapter_write_latency_seconds",
 		Help: "How long it took us to respond to write requests.",
 	})
-	writeSamples = prometheus.NewSummary(prometheus.SummaryOpts{
+	writeSamples = promauto.NewSummary(prometheus.SummaryOpts{
 		Name: "couchbase_adapter_write_timeseries_samples",
 		Help: "How many samples each written timeseries has.",
 	})
-	writeCBDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	writeCBDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "couchbase_adapter_write_couchbase_latency_seconds",
 		Help: "Latency for inserts to Couchbase Server.",
 	})
-	writeCBErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	writeCBErrors = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "couchbase_adapter_write_couchbase_failed_total",
 		Help: "How many inserts to Couchbase Server failed.",
 	})
-	readDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	readDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "couchbase_adapter_read_latency_seconds",
 		Help: "How long it took us to respond to read requests.",
 	})
-	readCBDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	readCBDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "couchbase_adapter_read_couchbase_latency_seconds",
 		Help: "Latency for selects from Crate.",
 	})
-	readCBErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	readCBErrors = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "couchbase_adapter_read_couchbase_failed_total",
 		Help: "How many selects from Crate failed.",
 	})
-	readSamples = prometheus.NewSummary(prometheus.SummaryOpts{
+	readSamples = promauto.NewSummary(prometheus.SummaryOpts{
 		Name: "couchbase_adapter_read_timeseries_samples",
 		Help: "How many samples each returned timeseries has.",
 	})
 )
-
-func init() {
-	prometheus.MustRegister(writeDuration)
-	prometheus.MustRegister(writeSamples)
-	prometheus.MustRegister(writeCBDuration)
-	prometheus.MustRegister(writeCBErrors)
-	prometheus.MustRegister(readDuration)
-	prometheus.MustRegister(readSamples)
-	prometheus.MustRegister(readCBDuration)
-	prometheus.MustRegister(readCBErrors)
-}
 
 func (ca *Adapter) handleWrite(w http.ResponseWriter, r *http.Request) {
 	timer := prometheus.NewTimer(writeDuration)
